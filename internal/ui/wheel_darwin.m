@@ -245,6 +245,34 @@ static void checkInputMonitoringPermission(void) {
     }
 }
 
+static NSArray<NSString *> *getSelectedFilesInFinder(void) {
+    NSString *src = @"tell application \"Finder\"\n"
+                    @"set sel to selection as alias list\n"
+                    @"set res to \"\"\n"
+                    @"repeat with itemRef in sel\n"
+                    @"    set res to res & POSIX path of itemRef & linefeed\n"
+                    @"end repeat\n"
+                    @"return res\n"
+                    @"end tell";
+    NSAppleScript *as = [[NSAppleScript alloc] initWithSource:src];
+    NSDictionary *err = nil;
+    NSAppleEventDescriptor *desc = [as executeAndReturnError:&err];
+    if (desc != nil) {
+        NSString *outStr = [desc stringValue];
+        if (outStr.length > 0) {
+            NSArray *lines = [outStr componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+            NSMutableArray *res = [NSMutableArray array];
+            for (NSString *l in lines) {
+                if (l.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:l]) {
+                    [res addObject:l];
+                }
+            }
+            return res;
+        }
+    }
+    return @[];
+}
+
 void startNativeEventMonitor(void) {
     if (_monitorRunning) return;
     _monitorRunning = YES;
@@ -271,23 +299,30 @@ void startNativeEventMonitor(void) {
                                 urls = [pb readObjectsForClasses:@[[NSURL class]]
                                                          options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
                             }
+                            NSMutableArray<NSString *> *files = [NSMutableArray array];
                             if (urls.count > 0) {
-                                NSMutableArray<NSString *> *files = [NSMutableArray array];
                                 for (NSURL *u in urls) {
                                     if (u.isFileURL) [files addObject:u.path];
                                 }
-                                if (files.count > 0) {
-                                    char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
-                                    if (cTargets != NULL) {
-                                        NSString *str = [NSString stringWithUTF8String:cTargets];
-                                        free(cTargets);
-                                        if (str.length > 0) {
-                                            NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
-                                            printf("\n[DragShift] 🎡 Shift+Drag: Showing conversion wheel for %s!\n",
-                                                   [files[0].lastPathComponent UTF8String]);
-                                            fflush(stdout);
-                                            showDropWheel(files, fmts);
-                                        }
+                            }
+                            if (files.count == 0) {
+                                NSArray<NSString *> *finderSel = getSelectedFilesInFinder();
+                                if (finderSel.count > 0) {
+                                    [files addObjectsFromArray:finderSel];
+                                }
+                            }
+
+                            if (files.count > 0) {
+                                char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
+                                if (cTargets != NULL) {
+                                    NSString *str = [NSString stringWithUTF8String:cTargets];
+                                    free(cTargets);
+                                    if (str.length > 0) {
+                                        NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
+                                        printf("\n[DragShift] 🎡 Shift+Drag: Showing conversion wheel for %s!\n",
+                                               [files[0].lastPathComponent UTF8String]);
+                                        fflush(stdout);
+                                        showDropWheel(files, fmts);
                                     }
                                 }
                             }
