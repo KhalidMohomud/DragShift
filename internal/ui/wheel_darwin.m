@@ -389,10 +389,10 @@ void stopNativeEventMonitor(void) {
 }
 
 void openFileDialogAndConvert(void) {
-    printf("[DragShift] 📂 'Select File to Convert...' triggered. Opening file chooser...\n");
+    printf("[DragShift] 📂 Opening file chooser dialog...\n");
     fflush(stdout);
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         [NSApp activateIgnoringOtherApps:YES];
 
         NSOpenPanel *panel = [NSOpenPanel openPanel];
@@ -400,63 +400,49 @@ void openFileDialogAndConvert(void) {
         [panel setCanChooseDirectories:NO];
         [panel setAllowsMultipleSelection:YES];
         [panel setMessage:@"Select an image, video, audio, or document to convert:"];
-        [panel setPrompt:@"Choose"];
+        [panel setPrompt:@"Convert"];
         [panel setLevel:NSFloatingWindowLevel];
 
-        // Restrict to supported file types so invalid files cannot be chosen
-        [panel setAllowedFileTypes:@[
-            @"png", @"jpg", @"jpeg", @"webp", @"gif", @"tiff", @"tif", @"bmp", @"heic", @"heif",
-            @"mov", @"mp4", @"mkv", @"avi", @"webm", @"m4v",
-            @"wav", @"mp3", @"m4a", @"aac", @"flac", @"ogg", @"aiff", @"aif",
-            @"docx", @"doc", @"xlsx", @"xls", @"odt", @"rtf", @"txt",
-            @"pdf", @"pptx", @"ppt"
-        ]];
-
-        NSModalResponse resp = [panel runModal];
-        printf("[DragShift] File dialog closed. Response: %ld\n", (long)resp);
-        fflush(stdout);
-
-        if (resp != NSModalResponseOK) {
-            printf("[DragShift] User cancelled file selection.\n");
+        [panel beginWithCompletionHandler:^(NSModalResponse resp) {
+            printf("[DragShift] File dialog result: %ld\n", (long)resp);
             fflush(stdout);
-            return;
-        }
 
-        NSArray<NSURL *> *urls = [panel URLs];
-        NSMutableArray<NSString *> *files = [NSMutableArray array];
-        for (NSURL *u in urls) {
-            if (u.isFileURL) [files addObject:u.path];
-        }
+            if (resp != NSModalResponseOK) {
+                printf("[DragShift] Selection cancelled or window closed.\n");
+                fflush(stdout);
+                return;
+            }
 
-        if (files.count == 0) {
-            return;
-        }
+            NSArray<NSURL *> *urls = [panel URLs];
+            NSMutableArray<NSString *> *files = [NSMutableArray array];
+            for (NSURL *u in urls) {
+                if (u.isFileURL) [files addObject:u.path];
+            }
 
-        char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
-        if (cTargets == NULL) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (files.count == 0) {
+                return;
+            }
+
+            char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
+            if (cTargets == NULL) {
                 [NSApp activateIgnoringOtherApps:YES];
                 NSAlert *noTargetAlert = [[NSAlert alloc] init];
-                [noTargetAlert setMessageText:@"No Formats Available"];
-                [noTargetAlert setInformativeText:[NSString stringWithFormat:@"File .%@ cannot be converted.", [files[0] pathExtension]]];
+                [noTargetAlert setMessageText:@"Unsupported Format"];
+                [noTargetAlert setInformativeText:[NSString stringWithFormat:@"'%@' cannot be converted.\nSupported: Images, Videos, Audio, PDF, Office docs.", [files[0] lastPathComponent]]];
                 [noTargetAlert runModal];
-            });
-            return;
-        }
+                return;
+            }
 
-        NSString *str = [NSString stringWithUTF8String:cTargets];
-        free(cTargets);
-        NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
-        if (fmts.count == 0) return;
+            NSString *str = [NSString stringWithUTF8String:cTargets];
+            free(cTargets);
+            NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
+            if (fmts.count == 0) return;
 
-        printf("[DragShift] File selected: %s (Available formats: %s)\n",
-               [files[0].lastPathComponent UTF8String], [str UTF8String]);
-        fflush(stdout);
+            printf("[DragShift] Selected: %s (Available formats: %s)\n",
+                   [files[0].lastPathComponent UTF8String], [str UTF8String]);
+            fflush(stdout);
 
-        // Safely present format picker on a fresh run loop cycle
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [NSApp activateIgnoringOtherApps:YES];
-
             NSAlert *alert = [[NSAlert alloc] init];
             [alert setMessageText:[NSString stringWithFormat:@"Convert '%@'", [files[0] lastPathComponent]]];
             [alert setInformativeText:@"Select your target format:"];
@@ -477,6 +463,6 @@ void openFileDialogAndConvert(void) {
                 fflush(stdout);
                 goPerformConversion((char *)[joined UTF8String], (char *)[chosenFormat UTF8String]);
             }
-        });
+        }];
     });
 }
