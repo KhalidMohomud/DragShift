@@ -392,58 +392,55 @@ void openFileDialogAndConvert(void) {
     printf("[DragShift] 📂 'Select File to Convert...' triggered. Opening file chooser...\n");
     fflush(stdout);
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [NSApp activateIgnoringOtherApps:YES];
 
         NSOpenPanel *panel = [NSOpenPanel openPanel];
         [panel setCanChooseFiles:YES];
         [panel setCanChooseDirectories:NO];
         [panel setAllowsMultipleSelection:YES];
-        [panel setMessage:@"Select files you want to convert:"];
+        [panel setMessage:@"Select an image, video, audio, or document to convert:"];
         [panel setPrompt:@"Choose"];
         [panel setLevel:NSFloatingWindowLevel];
 
+        // Restrict to supported file types so invalid files cannot be chosen
+        [panel setAllowedFileTypes:@[
+            @"png", @"jpg", @"jpeg", @"webp", @"gif", @"tiff", @"tif", @"bmp", @"heic", @"heif",
+            @"mov", @"mp4", @"mkv", @"avi", @"webm", @"m4v",
+            @"wav", @"mp3", @"m4a", @"aac", @"flac", @"ogg", @"aiff", @"aif",
+            @"docx", @"doc", @"xlsx", @"xls", @"odt", @"rtf", @"txt",
+            @"pdf", @"pptx", @"ppt"
+        ]];
+
         NSModalResponse resp = [panel runModal];
-        printf("[DragShift] File dialog closed. Response code: %ld\n", (long)resp);
+        printf("[DragShift] File dialog closed. Response: %ld\n", (long)resp);
         fflush(stdout);
 
-        NSArray<NSURL *> *urls = (resp == NSModalResponseOK) ? [panel URLs] : @[];
+        if (resp != NSModalResponseOK) {
+            printf("[DragShift] User cancelled file selection.\n");
+            fflush(stdout);
+            return;
+        }
+
+        NSArray<NSURL *> *urls = [panel URLs];
         NSMutableArray<NSString *> *files = [NSMutableArray array];
         for (NSURL *u in urls) {
             if (u.isFileURL) [files addObject:u.path];
         }
 
-        // If NSOpenPanel was dismissed or didn't get files, try AppleScript fallback
-        if (files.count == 0 && resp != NSModalResponseCancel) {
-            NSString *script = @"tell application \"System Events\"\n"
-                               @"activate\n"
-                               @"set f to choose file with prompt \"Select a file to convert:\"\n"
-                               @"return POSIX path of f\n"
-                               @"end tell";
-            NSAppleScript *as = [[NSAppleScript alloc] initWithSource:script];
-            NSDictionary *err = nil;
-            NSAppleEventDescriptor *desc = [as executeAndReturnError:&err];
-            if (desc != nil) {
-                NSString *p = [desc stringValue];
-                if (p.length > 0) {
-                    [files addObject:p];
-                }
-            }
-        }
-
         if (files.count == 0) {
-            printf("[DragShift] (No files selected)\n");
-            fflush(stdout);
             return;
         }
 
         char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
         if (cTargets == NULL) {
-            [NSApp activateIgnoringOtherApps:YES];
-            NSAlert *noTargetAlert = [[NSAlert alloc] init];
-            [noTargetAlert setMessageText:@"No Formats Available"];
-            [noTargetAlert setInformativeText:[NSString stringWithFormat:@"File format .%@ cannot be converted.", [files[0] pathExtension]]];
-            [noTargetAlert runModal];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [NSApp activateIgnoringOtherApps:YES];
+                NSAlert *noTargetAlert = [[NSAlert alloc] init];
+                [noTargetAlert setMessageText:@"No Formats Available"];
+                [noTargetAlert setInformativeText:[NSString stringWithFormat:@"File .%@ cannot be converted.", [files[0] pathExtension]]];
+                [noTargetAlert runModal];
+            });
             return;
         }
 
@@ -452,26 +449,34 @@ void openFileDialogAndConvert(void) {
         NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
         if (fmts.count == 0) return;
 
-        // Prompt user with format choices
-        [NSApp activateIgnoringOtherApps:YES];
-        NSAlert *alert = [[NSAlert alloc] init];
-        [alert setMessageText:[NSString stringWithFormat:@"Convert %@", [files[0] lastPathComponent]]];
-        [alert setInformativeText:@"Select target format:"];
+        printf("[DragShift] File selected: %s (Available formats: %s)\n",
+               [files[0].lastPathComponent UTF8String], [str UTF8String]);
+        fflush(stdout);
 
-        for (NSString *fmt in fmts) {
-            [alert addButtonWithTitle:[fmt uppercaseString]];
-        }
-        [alert addButtonWithTitle:@"Cancel"];
+        // Safely present format picker on a fresh run loop cycle
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [NSApp activateIgnoringOtherApps:YES];
 
-        NSModalResponse alertResp = [alert runModal];
-        NSInteger buttonIndex = alertResp - NSAlertFirstButtonReturn;
+            NSAlert *alert = [[NSAlert alloc] init];
+            [alert setMessageText:[NSString stringWithFormat:@"Convert '%@'", [files[0] lastPathComponent]]];
+            [alert setInformativeText:@"Select your target format:"];
 
-        if (buttonIndex >= 0 && (NSUInteger)buttonIndex < fmts.count) {
-            NSString *chosenFormat = fmts[buttonIndex];
-            NSString *joined = [files componentsJoinedByString:@"\n"];
-            printf("[DragShift] 🚀 Converting via dialog to [%s]...\n", [chosenFormat.uppercaseString UTF8String]);
-            fflush(stdout);
-            goPerformConversion((char *)[joined UTF8String], (char *)[chosenFormat UTF8String]);
-        }
+            for (NSString *fmt in fmts) {
+                [alert addButtonWithTitle:[fmt uppercaseString]];
+            }
+            [alert addButtonWithTitle:@"Cancel"];
+
+            NSModalResponse alertResp = [alert runModal];
+            NSInteger buttonIndex = alertResp - NSAlertFirstButtonReturn;
+
+            if (buttonIndex >= 0 && (NSUInteger)buttonIndex < fmts.count) {
+                NSString *chosenFormat = fmts[buttonIndex];
+                NSString *joined = [files componentsJoinedByString:@"\n"];
+                printf("[DragShift] 🚀 Converting %s → .%s ...\n",
+                       [files[0].lastPathComponent UTF8String], [chosenFormat UTF8String]);
+                fflush(stdout);
+                goPerformConversion((char *)[joined UTF8String], (char *)[chosenFormat UTF8String]);
+            }
+        });
     });
 }
