@@ -389,80 +389,79 @@ void stopNativeEventMonitor(void) {
 }
 
 void openFileDialogAndConvert(void) {
-    printf("[DragShift] 📂 Opening file chooser dialog...\n");
+    printf("[DragShift] 📂 Opening file picker via AppleScript...\n");
     fflush(stdout);
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [NSApp activateIgnoringOtherApps:YES];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // Use AppleScript to pick files - runs in a separate process, no conflict with systray
+        NSString *script =
+            @"set f to choose file with prompt \"Select a file to convert:\" "
+            @"of type {\"png\",\"jpg\",\"jpeg\",\"heic\",\"heif\",\"webp\",\"gif\","
+            @"\"tiff\",\"tif\",\"bmp\",\"mov\",\"mp4\",\"mkv\",\"avi\",\"webm\","
+            @"\"m4v\",\"wav\",\"mp3\",\"m4a\",\"aac\",\"flac\",\"ogg\",\"aiff\","
+            @"\"aif\",\"docx\",\"doc\",\"xlsx\",\"xls\",\"odt\",\"rtf\",\"txt\","
+            @"\"pdf\",\"pptx\",\"ppt\"}\n"
+            @"return POSIX path of f";
 
-        NSOpenPanel *panel = [NSOpenPanel openPanel];
-        [panel setCanChooseFiles:YES];
-        [panel setCanChooseDirectories:NO];
-        [panel setAllowsMultipleSelection:YES];
-        [panel setMessage:@"Select an image, video, audio, or document to convert:"];
-        [panel setPrompt:@"Convert"];
-        [panel setLevel:NSFloatingWindowLevel];
+        NSAppleScript *as = [[NSAppleScript alloc] initWithSource:script];
+        NSDictionary *err = nil;
+        NSAppleEventDescriptor *desc = [as executeAndReturnError:&err];
 
-        [panel beginWithCompletionHandler:^(NSModalResponse resp) {
-            printf("[DragShift] File dialog result: %ld\n", (long)resp);
+        if (desc == nil || [desc stringValue].length == 0) {
+            printf("[DragShift] (No file selected or cancelled)\n");
             fflush(stdout);
+            return;
+        }
 
-            if (resp != NSModalResponseOK) {
-                printf("[DragShift] Selection cancelled or window closed.\n");
-                fflush(stdout);
-                return;
-            }
+        NSString *filePath = [[desc stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        printf("[DragShift] ✅ Selected: %s\n", [filePath UTF8String]);
+        fflush(stdout);
 
-            NSArray<NSURL *> *urls = [panel URLs];
-            NSMutableArray<NSString *> *files = [NSMutableArray array];
-            for (NSURL *u in urls) {
-                if (u.isFileURL) [files addObject:u.path];
-            }
-
-            if (files.count == 0) {
-                return;
-            }
-
-            char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
-            if (cTargets == NULL) {
-                [NSApp activateIgnoringOtherApps:YES];
-                NSAlert *noTargetAlert = [[NSAlert alloc] init];
-                [noTargetAlert setMessageText:@"Unsupported Format"];
-                [noTargetAlert setInformativeText:[NSString stringWithFormat:@"'%@' cannot be converted.\nSupported: Images, Videos, Audio, PDF, Office docs.", [files[0] lastPathComponent]]];
-                [noTargetAlert runModal];
-                return;
-            }
-
-            NSString *str = [NSString stringWithUTF8String:cTargets];
-            free(cTargets);
-            NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
-            if (fmts.count == 0) return;
-
-            printf("[DragShift] Selected: %s (Available formats: %s)\n",
-                   [files[0].lastPathComponent UTF8String], [str UTF8String]);
+        char *cTargets = goGetTargetsForFile((char *)[filePath UTF8String]);
+        if (cTargets == NULL) {
+            printf("[DragShift] ✗ Unsupported file type: %s\n", [[filePath pathExtension] UTF8String]);
             fflush(stdout);
+            return;
+        }
 
-            [NSApp activateIgnoringOtherApps:YES];
-            NSAlert *alert = [[NSAlert alloc] init];
-            [alert setMessageText:[NSString stringWithFormat:@"Convert '%@'", [files[0] lastPathComponent]]];
-            [alert setInformativeText:@"Select your target format:"];
+        NSString *str = [NSString stringWithUTF8String:cTargets];
+        free(cTargets);
+        NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
+        if (fmts.count == 0) return;
 
-            for (NSString *fmt in fmts) {
-                [alert addButtonWithTitle:[fmt uppercaseString]];
-            }
-            [alert addButtonWithTitle:@"Cancel"];
+        printf("[DragShift] Available formats: %s\n", [str UTF8String]);
+        fflush(stdout);
 
-            NSModalResponse alertResp = [alert runModal];
-            NSInteger buttonIndex = alertResp - NSAlertFirstButtonReturn;
+        // Build options string for AppleScript dialog
+        NSMutableString *fmtList = [NSMutableString string];
+        for (NSUInteger i = 0; i < fmts.count; i++) {
+            if (i > 0) [fmtList appendString:@", "];
+            [fmtList appendFormat:@"\"%@\"", [fmts[i] uppercaseString]];
+        }
 
-            if (buttonIndex >= 0 && (NSUInteger)buttonIndex < fmts.count) {
-                NSString *chosenFormat = fmts[buttonIndex];
-                NSString *joined = [files componentsJoinedByString:@"\n"];
-                printf("[DragShift] 🚀 Converting %s → .%s ...\n",
-                       [files[0].lastPathComponent UTF8String], [chosenFormat UTF8String]);
-                fflush(stdout);
-                goPerformConversion((char *)[joined UTF8String], (char *)[chosenFormat UTF8String]);
-            }
-        }];
+        NSString *chooseScript = [NSString stringWithFormat:
+            @"set theFormats to {%@}\n"
+            @"set chosen to choose from list theFormats with prompt "
+            @"\"Convert '%@' to:\" default items {item 1 of theFormats} with title \"DragShift\"\n"
+            @"if chosen is false then return \"\"\n"
+            @"return item 1 of chosen",
+            fmtList, [filePath lastPathComponent]];
+
+        NSAppleScript *chooseAs = [[NSAppleScript alloc] initWithSource:chooseScript];
+        NSDictionary *chooseErr = nil;
+        NSAppleEventDescriptor *chooseDesc = [chooseAs executeAndReturnError:&chooseErr];
+
+        if (chooseDesc == nil || [chooseDesc stringValue].length == 0) {
+            printf("[DragShift] (Format selection cancelled)\n");
+            fflush(stdout);
+            return;
+        }
+
+        NSString *chosenFmt = [[chooseDesc stringValue] lowercaseString];
+        printf("[DragShift] 🚀 Converting %s → .%s ...\n",
+               [[filePath lastPathComponent] UTF8String], [chosenFmt UTF8String]);
+        fflush(stdout);
+
+        goPerformConversion((char *)[filePath UTF8String], (char *)[chosenFmt UTF8String]);
     });
 }
