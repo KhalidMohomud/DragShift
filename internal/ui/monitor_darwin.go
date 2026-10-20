@@ -4,9 +4,10 @@ package ui
 
 /*
 #cgo CFLAGS: -x objective-c
-#cgo LDFLAGS: -framework Cocoa
+#cgo LDFLAGS: -framework Cocoa -framework ApplicationServices
 
 #import <Cocoa/Cocoa.h>
+#import <ApplicationServices/ApplicationServices.h>
 
 // _monitorRunning guards the NSEvent global monitor lifecycle.
 static id _globalMonitor = nil;
@@ -14,6 +15,23 @@ static BOOL _monitorRunning = NO;
 
 // Forward declaration of the Go callback (CGo generates 'char*', not 'const char*').
 extern void goShiftDragCallback(char *paths);
+
+static void checkInputMonitoringPermission(void) {
+    if (!CGPreflightListenEventAccess()) {
+        CGRequestListenEventAccess();
+        printf("\n=======================================================\n");
+        printf("⚠️  macOS INPUT MONITORING PERMISSION REQUIRED\n");
+        printf("DragShift needs permission to detect the Shift key while dragging.\n");
+        printf("1. Open System Settings > Privacy & Security > Input Monitoring\n");
+        printf("2. Turn ON Terminal (or your current terminal app)\n");
+        printf("3. Restart DragShift (press Ctrl+C, then 'make run')\n");
+        printf("=======================================================\n\n");
+        fflush(stdout);
+    } else {
+        printf("[DragShift] ✓ Input Monitoring permission: OK\n");
+        fflush(stdout);
+    }
+}
 
 // startNativeEventMonitor installs an NSEvent global monitor that watches
 // for left-mouse-drag events while the Shift modifier is held. When such
@@ -23,58 +41,72 @@ static void startNativeEventMonitor(void) {
     if (_monitorRunning) return;
     _monitorRunning = YES;
 
-    // We need a running NSApplication for global event monitors.
-    [NSApplication sharedApplication];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        checkInputMonitoringPermission();
 
-    NSEventMask mask = NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp;
+        NSEventMask mask = NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp;
+        __block BOOL sawShiftDrag = NO;
 
-    // Track whether we saw a shift-drag so we only fire once per gesture.
-    __block BOOL sawShiftDrag = NO;
-
-    _globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask
-        handler:^(NSEvent *event) {
-            if (event.type == NSEventTypeLeftMouseDragged) {
-                if (event.modifierFlags & NSEventModifierFlagShift) {
-                    sawShiftDrag = YES;
-                }
-                return;
-            }
-
-            // Mouse-up after a shift-drag.
-            if (event.type == NSEventTypeLeftMouseUp && sawShiftDrag) {
-                sawShiftDrag = NO;
-
-                // Read file URLs from the general pasteboard. macOS puts
-                // dragged file URLs on the general pasteboard when a drag
-                // session begins from Finder.
-                NSPasteboard *pb = [NSPasteboard generalPasteboard];
-                NSArray<NSURL *> *urls = [pb readObjectsForClasses:@[[NSURL class]]
-                                                           options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
-                if (urls.count == 0) {
-                    // Fallback: try the drag pasteboard.
-                    pb = [NSPasteboard pasteboardWithName:NSPasteboardNameDrag];
-                    urls = [pb readObjectsForClasses:@[[NSURL class]]
-                                             options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
-                }
-                if (urls.count == 0) return;
-
-                // Build a newline-separated list of file paths.
-                NSMutableArray<NSString *> *pathList = [NSMutableArray array];
-                for (NSURL *url in urls) {
-                    if (url.isFileURL) {
-                        [pathList addObject:url.path];
+        _globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask
+            handler:^(NSEvent *event) {
+                if (event.type == NSEventTypeLeftMouseDragged) {
+                    if (event.modifierFlags & NSEventModifierFlagShift) {
+                        if (!sawShiftDrag) {
+                            printf("[DragShift] ⇧ Shift+drag active... release mouse when ready.\n");
+                            fflush(stdout);
+                        }
+                        sawShiftDrag = YES;
                     }
+                    return;
                 }
-                if (pathList.count == 0) return;
 
-                NSString *joined = [pathList componentsJoinedByString:@"\n"];
-                goShiftDragCallback((char *)[joined UTF8String]);
-            }
-        }];
+                // Mouse-up after a shift-drag.
+                if (event.type == NSEventTypeLeftMouseUp && sawShiftDrag) {
+                    sawShiftDrag = NO;
 
-    // Run the run-loop so the monitor receives events.
-    // This call blocks; it is expected to be called from a goroutine.
-    [[NSRunLoop currentRunLoop] run];
+                    // Read file URLs from drag pasteboard first, then general pasteboard.
+                    NSPasteboard *pb = [NSPasteboard pasteboardWithName:NSPasteboardNameDrag];
+                    NSArray<NSURL *> *urls = [pb readObjectsForClasses:@[[NSURL class]]
+                                                             options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+                    if (urls.count == 0) {
+                        pb = [NSPasteboard generalPasteboard];
+                        urls = [pb readObjectsForClasses:@[[NSURL class]]
+                                                 options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+                    }
+                    if (urls.count == 0) {
+                        printf("[DragShift] ℹ️ Mouse released, but no file URLs were found in drag pasteboard.\n");
+                        fflush(stdout);
+                        return;
+                    }
+
+                    // Build a newline-separated list of file paths.
+                    NSMutableArray<NSString *> *pathList = [NSMutableArray array];
+                    for (NSURL *url in urls) {
+                        if (url.isFileURL) {
+                            [pathList addObject:url.path];
+                        }
+                    }
+                    if (pathList.count == 0) return;
+
+                    printf("[DragShift] 🎯 Detected %lu file(s):\n", (unsigned long)pathList.count);
+                    for (NSString *p in pathList) {
+                        printf("   • %s\n", [p UTF8String]);
+                    }
+                    fflush(stdout);
+
+                    NSString *joined = [pathList componentsJoinedByString:@"\n"];
+                    goShiftDragCallback((char *)[joined UTF8String]);
+                }
+            }];
+
+        if (_globalMonitor == nil) {
+            printf("[DragShift] ⚠️ Warning: Failed to register global event monitor. Grant Input Monitoring permission in System Settings.\n");
+            fflush(stdout);
+        } else {
+            printf("[DragShift] ✓ Shift+drag monitor is ACTIVE and ready.\n");
+            fflush(stdout);
+        }
+    });
 }
 
 // stopNativeEventMonitor removes the global event monitor.
@@ -116,8 +148,7 @@ func goShiftDragCallback(cPaths *C.char) {
 }
 
 // startEventMonitor starts the macOS global event monitor for Shift+drag
-// gestures. Detected file paths are sent to ch. This function blocks
-// until the monitor is stopped.
+// gestures. Detected file paths are sent to ch.
 func startEventMonitor(ch chan<- []string) error {
 	fileChan = ch
 	C.startNativeEventMonitor()

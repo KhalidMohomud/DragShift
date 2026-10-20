@@ -64,6 +64,17 @@ func (a *App) onReady() {
 	systray.SetTitle("⇧")
 	systray.SetTooltip("DragShift — Hold ⇧ while dragging a file to convert it")
 
+	fmt.Println("\n=======================================================")
+	fmt.Println("🚀 DragShift is RUNNING!")
+	fmt.Println("=======================================================")
+	fmt.Println("• Menu Bar: Look for [ ⇧ ] in your Mac menu bar (top right corner).")
+	fmt.Println("• How to use:")
+	fmt.Println("  1. In Finder, drag any file (e.g. image, video, audio, pdf)")
+	fmt.Println("  2. Hold the Shift (⇧) key while dragging")
+	fmt.Println("  3. Release mouse, then click [ ⇧ ] in the menu bar to convert")
+	fmt.Println("• To stop DragShift, press Ctrl+C in this terminal.")
+	fmt.Println("=======================================================\n")
+
 	// Static informational item (disabled so it can't be clicked).
 	info := systray.AddMenuItem("Hold ⇧ while dragging a file", "")
 	info.Disable()
@@ -147,7 +158,9 @@ func (a *App) onFilesDetected(files []string) {
 	header.Disable()
 	a.formatItems = append(a.formatItems, header)
 
+	fmt.Println("[DragShift] Available target formats:")
 	for _, f := range formats {
+		fmt.Printf("   → Click '%s' under [ ⇧ ] in menu bar\n", f)
 		item := systray.AddMenuItem(fmt.Sprintf("  → %s", f), fmt.Sprintf("Convert to %s", f))
 		a.formatItems = append(a.formatItems, item)
 
