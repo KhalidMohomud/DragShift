@@ -11,3 +11,6 @@ func startEventMonitor() error {
 
 // stopEventMonitor is a no-op on non-macOS platforms.
 func stopEventMonitor() {}
+
+// OpenFileDialog is a no-op on non-macOS platforms.
+func OpenFileDialog() {}

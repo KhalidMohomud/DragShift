@@ -387,3 +387,58 @@ void stopNativeEventMonitor(void) {
     hideDropWheel();
     _monitorRunning = NO;
 }
+
+void openFileDialogAndConvert(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        [panel setCanChooseFiles:YES];
+        [panel setCanChooseDirectories:NO];
+        [panel setAllowsMultipleSelection:YES];
+        [panel setMessage:@"Select files you want to convert:"];
+        [panel setPrompt:@"Choose"];
+
+        if ([panel runModal] == NSModalResponseOK) {
+            NSArray<NSURL *> *urls = [panel URLs];
+            NSMutableArray<NSString *> *files = [NSMutableArray array];
+            for (NSURL *u in urls) {
+                if (u.isFileURL) [files addObject:u.path];
+            }
+            if (files.count == 0) return;
+
+            char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
+            if (cTargets == NULL) {
+                NSAlert *noTargetAlert = [[NSAlert alloc] init];
+                [noTargetAlert setMessageText:@"No Formats Available"];
+                [noTargetAlert setInformativeText:[NSString stringWithFormat:@"File format .%@ cannot be converted.", [files[0] pathExtension]]];
+                [noTargetAlert runModal];
+                return;
+            }
+
+            NSString *str = [NSString stringWithUTF8String:cTargets];
+            free(cTargets);
+            NSArray<NSString *> *fmts = [str componentsSeparatedByString:@","];
+            if (fmts.count == 0) return;
+
+            // Prompt user with choices
+            NSAlert *alert = [[NSAlert alloc] init];
+            [alert setMessageText:[NSString stringWithFormat:@"Convert %lu file(s)", (unsigned long)files.count]];
+            [alert setInformativeText:@"Select target format:"];
+
+            for (NSString *fmt in fmts) {
+                [alert addButtonWithTitle:[fmt uppercaseString]];
+            }
+            [alert addButtonWithTitle:@"Cancel"];
+
+            NSModalResponse resp = [alert runModal];
+            NSInteger buttonIndex = resp - NSAlertFirstButtonReturn;
+
+            if (buttonIndex >= 0 && (NSUInteger)buttonIndex < fmts.count) {
+                NSString *chosenFormat = fmts[buttonIndex];
+                NSString *joined = [files componentsJoinedByString:@"\n"];
+                printf("[DragShift] Converting via dialog to [%s]...\n", [chosenFormat.uppercaseString UTF8String]);
+                fflush(stdout);
+                goPerformConversion((char *)[joined UTF8String], (char *)[chosenFormat UTF8String]);
+            }
+        }
+    });
+}

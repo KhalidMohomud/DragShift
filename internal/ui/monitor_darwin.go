@@ -53,9 +53,14 @@ func startEventMonitor() error {
 	return nil
 }
 
-// stopEventMonitor tears down the macOS global event monitor.
+// StopEventMonitor tears down the macOS global event monitor.
 func stopEventMonitor() {
 	C.stopNativeEventMonitor()
+}
+
+// OpenFileDialog opens the macOS native file picker to choose and convert files.
+func OpenFileDialog() {
+	C.openFileDialogAndConvert()
 }
 
 // Force the linker to keep the cgo export symbol alive.

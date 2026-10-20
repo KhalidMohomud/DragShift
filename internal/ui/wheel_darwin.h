@@ -5,5 +5,6 @@
 
 void startNativeEventMonitor(void);
 void stopNativeEventMonitor(void);
+void openFileDialogAndConvert(void);
 
 #endif

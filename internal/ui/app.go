@@ -75,8 +75,12 @@ func (a *App) onReady() {
 	fmt.Println("• To stop DragShift, press Ctrl+C in this terminal.")
 	fmt.Println("=======================================================\n")
 
+	mConvert := systray.AddMenuItem("Select File to Convert...", "Choose a file to convert")
+
+	systray.AddSeparator()
+
 	// Static informational item (disabled so it can't be clicked).
-	info := systray.AddMenuItem("Hold ⇧ while dragging a file", "")
+	info := systray.AddMenuItem("Or: Hold ⇧ while dragging a file in Finder", "")
 	info.Disable()
 
 	systray.AddSeparator()
@@ -86,12 +90,18 @@ func (a *App) onReady() {
 	// Start the native macOS event monitor in the background.
 	go a.startMonitor()
 
-	// Wait for quit from either the menu item or an external Stop call.
+	// Listen for menu actions.
 	go func() {
-		select {
-		case <-mQuit.ClickedCh:
-			a.Stop()
-		case <-a.quit:
+		for {
+			select {
+			case <-mConvert.ClickedCh:
+				OpenFileDialog()
+			case <-mQuit.ClickedCh:
+				a.Stop()
+				return
+			case <-a.quit:
+				return
+			}
 		}
 	}()
 }
