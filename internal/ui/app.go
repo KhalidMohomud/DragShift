@@ -101,27 +101,10 @@ func (a *App) onExit() {
 	stopEventMonitor()
 }
 
-// startMonitor kicks off the platform-specific Shift+drag event monitor
-// and processes callbacks on a dedicated goroutine.
+// startMonitor kicks off the platform-specific Shift+drag event monitor.
 func (a *App) startMonitor() {
-	fileCh := make(chan []string, 1)
-
-	// startEventMonitor is implemented in monitor_darwin.go (or stubbed
-	// in monitor_other.go). It pushes file paths into fileCh each time a
-	// Shift+drag gesture is recognised.
-	go func() {
-		if err := startEventMonitor(fileCh); err != nil {
-			log.Printf("event monitor error: %v", err)
-		}
-	}()
-
-	for {
-		select {
-		case files := <-fileCh:
-			a.onFilesDetected(files)
-		case <-a.quit:
-			return
-		}
+	if err := startEventMonitor(); err != nil {
+		log.Printf("event monitor error: %v", err)
 	}
 }
 

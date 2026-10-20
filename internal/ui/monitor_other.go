@@ -5,7 +5,7 @@ package ui
 import "fmt"
 
 // startEventMonitor is a stub for non-macOS platforms.
-func startEventMonitor(ch chan<- []string) error {
+func startEventMonitor() error {
 	return fmt.Errorf("DragShift: shift+drag event monitoring is only supported on macOS")
 }
 
