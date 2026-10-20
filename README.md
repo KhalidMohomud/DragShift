@@ -55,3 +55,4 @@ internal/ui/       macOS menu bar UI
 ## License
 
 MIT
+# DragShift
