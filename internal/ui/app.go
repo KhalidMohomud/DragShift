@@ -95,6 +95,7 @@ func (a *App) onReady() {
 		for {
 			select {
 			case <-mConvert.ClickedCh:
+				fmt.Println("[DragShift] 'Select File to Convert...' clicked from menu bar.")
 				OpenFileDialog()
 			case <-mQuit.ClickedCh:
 				a.Stop()
