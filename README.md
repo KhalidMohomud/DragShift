@@ -56,3 +56,4 @@ internal/ui/       macOS menu bar UI
 
 MIT
 # DragShift
+# devops
