@@ -22,7 +22,7 @@ var imageExts = map[string]bool{
 }
 
 // imageTargets lists valid output formats for images.
-var imageTargets = []string{"png", "jpg", "webp", "pdf", "gif", "pptx"}
+var imageTargets = []string{"png", "jpg", "webp", "pdf", "gif"}
 
 // videoExts lists source video extensions.
 var videoExts = map[string]bool{
@@ -60,7 +60,7 @@ var slidesExts = map[string]bool{
 var slidesTargets = []string{"pdf", "png", "jpg", "pptx", "ppt"}
 
 // pdfTargets lists valid output formats for PDF files.
-var pdfTargets = []string{"png", "txt", "pptx"}
+var pdfTargets = []string{"png", "txt"}
 
 // ---------------------------------------------------------------------------
 // ConversionError
@@ -213,44 +213,50 @@ func Convert(src, ext string) ([]string, error) {
 // ---------------------------------------------------------------------------
 
 func convertImage(src, ext string) ([]string, error) {
-	if ext == "pptx" {
-		return nil, &ConversionError{Src: src, Target: ext, Message: "PPTX generation not yet supported in Go version"}
-	}
-
 	dst := UniquePath(src, ext)
-	srcExt := strings.ToLower(filepath.Ext(src))
 
-	// For HEIC, try sips first (macOS built-in), then fall back to magick.
-	if srcExt == ".heic" {
-		if sipsPath, err := exec.LookPath("sips"); err == nil {
-			// sips only outputs a few formats. Map ext → sips format string.
-			sipsFmt := sipsFormat(ext)
-			if sipsFmt != "" {
-				cmd := exec.Command(sipsPath, "-s", "format", sipsFmt, src, "--out", dst)
-				if out, err := cmd.CombinedOutput(); err == nil {
-					return []string{dst}, nil
-				} else {
-					// Fall through to magick.
-					_ = out
-				}
-			}
+	// Try each available backend in turn: sips ships with macOS and needs no
+	// install, ImageMagick handles the rest, and ffmpeg covers WebP output.
+	type attempt struct {
+		name string
+		bin  string
+		args []string
+	}
+	var attempts []attempt
+
+	if f := sipsFormat(ext); f != "" {
+		if p, err := exec.LookPath("sips"); err == nil {
+			attempts = append(attempts, attempt{"sips", p, []string{"-s", "format", f, src, "--out", dst}})
+		}
+	}
+	if m := findMagick(); m != "" {
+		attempts = append(attempts, attempt{"ImageMagick", m, []string{src, dst}})
+	}
+	if ext != "pdf" {
+		if p, err := exec.LookPath("ffmpeg"); err == nil {
+			attempts = append(attempts, attempt{"ffmpeg", p, []string{"-i", src, "-frames:v", "1", "-y", dst}})
 		}
 	}
 
-	// Try magick, then fall back to convert (older ImageMagick).
-	magick := findMagick()
-	if magick == "" {
-		return nil, &ConversionError{Src: src, Target: ext, Message: "ImageMagick not found (install magick or convert)"}
+	if len(attempts) == 0 {
+		return nil, &ConversionError{Src: src, Target: ext, Message: "no image converter found (brew install imagemagick)"}
 	}
 
-	// image → PDF: use ImageMagick.
-	// Generic image conversion.
-	cmd := exec.Command(magick, src, dst)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, &ConversionError{Src: src, Target: ext, Message: string(out), Err: err}
+	var last error
+	for _, a := range attempts {
+		out, err := exec.Command(a.bin, a.args...).CombinedOutput()
+		if err == nil && fileExists(dst) {
+			return []string{dst}, nil
+		}
+		_ = os.Remove(dst) // don't leave a partial file behind
+		last = &ConversionError{Src: src, Target: ext, Message: a.name + ": " + strings.TrimSpace(string(out)), Err: err}
 	}
-
-	return []string{dst}, nil
+	if findMagick() == "" {
+		if ce, ok := last.(*ConversionError); ok {
+			ce.Message += " (try: brew install imagemagick)"
+		}
+	}
+	return nil, last
 }
 
 // ---------------------------------------------------------------------------
@@ -402,9 +408,6 @@ func convertSlides(src, ext string) ([]string, error) {
 
 func convertPDF(src, ext string) ([]string, error) {
 	switch ext {
-	case "pptx":
-		return nil, &ConversionError{Src: src, Target: ext, Message: "PPTX generation not yet supported in Go version"}
-
 	case "png":
 		return pdfToPNG(src)
 

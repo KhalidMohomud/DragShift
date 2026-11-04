@@ -30,16 +30,21 @@ static inline int wedge_index(CGFloat dx, CGFloat dy, int n) {
 @property (nonatomic, strong) NSArray<NSString *> *formats;
 @property (nonatomic, strong) NSArray<NSString *> *filePaths;
 @property (nonatomic, assign) NSInteger hotIndex;
+@property (nonatomic, assign) BOOL clickToConvert;
 @end
 
 @implementation DragShiftWheelView
 
-- (instancetype)initWithFrame:(NSRect)frame formats:(NSArray<NSString *> *)formats files:(NSArray<NSString *> *)files {
+- (instancetype)initWithFrame:(NSRect)frame
+                       formats:(NSArray<NSString *> *)formats
+                         files:(NSArray<NSString *> *)files
+                clickToConvert:(BOOL)clickToConvert {
     self = [super initWithFrame:frame];
     if (self) {
         _formats = formats;
         _filePaths = files;
         _hotIndex = -1;
+        _clickToConvert = clickToConvert;
         [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     }
     return self;
@@ -47,6 +52,13 @@ static inline int wedge_index(CGFloat dx, CGFloat dy, int n) {
 
 - (BOOL)isFlipped {
     return NO;
+}
+
+// The wheel is a non-activating overlay, so it must accept the first click
+// without requiring the user to click once to focus DragShift and again to
+// choose a format.
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    return YES;
 }
 
 - (NSPoint)centerPoint {
@@ -175,6 +187,23 @@ static inline int wedge_index(CGFloat dx, CGFloat dy, int n) {
     return YES;
 }
 
+// When the wheel was opened from a Finder selection (rather than a drag),
+// a regular click on a wedge performs the conversion.
+- (void)mouseUp:(NSEvent *)event {
+    if (!_clickToConvert) return;
+
+    NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger idx = [self indexForPoint:pt];
+    if (idx < 0 || (NSUInteger)idx >= _formats.count || _filePaths.count == 0) return;
+
+    NSString *chosenFormat = _formats[idx];
+    NSString *joined = [_filePaths componentsJoinedByString:@"\n"];
+    printf("[DragShift] 🎯 Selected [%s]!\n", [chosenFormat.uppercaseString UTF8String]);
+    fflush(stdout);
+    goPerformConversion((char *)[joined UTF8String], (char *)[chosenFormat UTF8String]);
+    [[self window] orderOut:nil];
+}
+
 @end
 
 // Global references for panel
@@ -183,7 +212,7 @@ static DragShiftWheelView *_wheelView = nil;
 static id _globalMonitor = nil;
 static BOOL _monitorRunning = NO;
 
-static void showDropWheel(NSArray<NSString *> *files, NSArray<NSString *> *formats) {
+static void showDropWheel(NSArray<NSString *> *files, NSArray<NSString *> *formats, BOOL clickToConvert) {
     if (formats.count == 0 || files.count == 0) return;
 
     if (_dropPanel != nil) {
@@ -212,7 +241,8 @@ static void showDropWheel(NSArray<NSString *> *files, NSArray<NSString *> *forma
 
     _wheelView = [[DragShiftWheelView alloc] initWithFrame:NSMakeRect(0, 0, size, size)
                                                    formats:formats
-                                                     files:files];
+                                                     files:files
+                                            clickToConvert:clickToConvert];
     [_dropPanel setContentView:_wheelView];
 
     [_dropPanel setAlphaValue:0.0];
@@ -254,23 +284,47 @@ static NSArray<NSString *> *getSelectedFilesInFinder(void) {
                     @"end repeat\n"
                     @"return res\n"
                     @"end tell";
-    NSAppleScript *as = [[NSAppleScript alloc] initWithSource:src];
-    NSDictionary *err = nil;
-    NSAppleEventDescriptor *desc = [as executeAndReturnError:&err];
-    if (desc != nil) {
-        NSString *outStr = [desc stringValue];
-        if (outStr.length > 0) {
-            NSArray *lines = [outStr componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-            NSMutableArray *res = [NSMutableArray array];
-            for (NSString *l in lines) {
-                if (l.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:l]) {
-                    [res addObject:l];
-                }
-            }
-            return res;
+    NSAppleScript *script = [[NSAppleScript alloc] initWithSource:src];
+    NSDictionary *error = nil;
+    NSAppleEventDescriptor *result = [script executeAndReturnError:&error];
+    if (result == nil) {
+        NSLog(@"[DragShift] Could not read the Finder selection: %@", error);
+        return @[];
+    }
+
+    NSString *outStr = result.stringValue;
+    NSArray *lines = [outStr componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSMutableArray *res = [NSMutableArray array];
+    for (NSString *line in lines) {
+        if (line.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:line]) {
+            [res addObject:line];
         }
     }
-    return @[];
+    return res;
+}
+
+static BOOL isFinderFrontmost(void) {
+    NSRunningApplication *frontmost = [[NSWorkspace sharedWorkspace] frontmostApplication];
+    return [frontmost.bundleIdentifier isEqualToString:@"com.apple.finder"];
+}
+
+// A normal Finder selection has no drag pasteboard. This function is called
+// after the Shift event has completed so AppKit can safely show the wheel.
+static void showWheelForFinderSelection(void) {
+    NSArray<NSString *> *files = getSelectedFilesInFinder();
+    if (files.count == 0 || _dropPanel != nil) return;
+
+    char *cTargets = goGetTargetsForFile((char *)[files[0] UTF8String]);
+    if (cTargets == NULL) return;
+    NSString *targetString = [NSString stringWithUTF8String:cTargets];
+    free(cTargets);
+    if (targetString.length == 0) return;
+
+    NSArray<NSString *> *formats = [targetString componentsSeparatedByString:@","];
+    printf("\n[DragShift] ⇧ Selected file: Showing conversion wheel for %s!\n",
+           [files[0].lastPathComponent UTF8String]);
+    fflush(stdout);
+    showDropWheel(files, formats, YES);
 }
 
 void startNativeEventMonitor(void) {
@@ -280,11 +334,34 @@ void startNativeEventMonitor(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         checkInputMonitoringPermission();
 
-        NSEventMask mask = NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp;
+        NSEventMask mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged |
+                           NSEventMaskLeftMouseUp | NSEventMaskFlagsChanged;
         __block BOOL sawShiftDrag = NO;
+        __block BOOL mouseIsDown = NO;
+        __block BOOL shiftWasDown = NO;
 
         _globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask
             handler:^(NSEvent *event) {
+                if (event.type == NSEventTypeLeftMouseDown) {
+                    mouseIsDown = YES;
+                    return;
+                }
+
+                if (event.type == NSEventTypeFlagsChanged) {
+                    BOOL shiftIsDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+                    if (shiftIsDown && !shiftWasDown && !mouseIsDown && _dropPanel == nil && isFinderFrontmost()) {
+                        // Do not show an alert or send an Apple Event while
+                        // AppKit is still dispatching a keyboard event.
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (_dropPanel == nil && isFinderFrontmost()) {
+                                showWheelForFinderSelection();
+                            }
+                        });
+                    }
+                    shiftWasDown = shiftIsDown;
+                    return;
+                }
+
                 if (event.type == NSEventTypeLeftMouseDragged) {
                     BOOL shiftPressed = (event.modifierFlags & NSEventModifierFlagShift) != 0;
                     if (shiftPressed) {
@@ -322,7 +399,7 @@ void startNativeEventMonitor(void) {
                                         printf("\n[DragShift] 🎡 Shift+Drag: Showing conversion wheel for %s!\n",
                                                [files[0].lastPathComponent UTF8String]);
                                         fflush(stdout);
-                                        showDropWheel(files, fmts);
+                                        showDropWheel(files, fmts, NO);
                                     }
                                 }
                             }
@@ -345,6 +422,7 @@ void startNativeEventMonitor(void) {
 
                 // Mouse up: convert if dropped on a wedge
                 if (event.type == NSEventTypeLeftMouseUp) {
+                    mouseIsDown = NO;
                     if (_dropPanel != nil && sawShiftDrag) {
                         sawShiftDrag = NO;
                         NSPoint mouseLoc = [NSEvent mouseLocation];
@@ -389,31 +467,35 @@ void stopNativeEventMonitor(void) {
 }
 
 void openFileDialogAndConvert(void) {
-    printf("[DragShift] 📂 Opening file picker via AppleScript...\n");
+    printf("[DragShift] 📂 Opening native file picker...\n");
     fflush(stdout);
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // Use AppleScript to pick files - runs in a separate process, no conflict with systray
-        NSString *script =
-            @"set f to choose file with prompt \"Select a file to convert:\" "
-            @"of type {\"png\",\"jpg\",\"jpeg\",\"heic\",\"heif\",\"webp\",\"gif\","
-            @"\"tiff\",\"tif\",\"bmp\",\"mov\",\"mp4\",\"mkv\",\"avi\",\"webm\","
-            @"\"m4v\",\"wav\",\"mp3\",\"m4a\",\"aac\",\"flac\",\"ogg\",\"aiff\","
-            @"\"aif\",\"docx\",\"doc\",\"xlsx\",\"xls\",\"odt\",\"rtf\",\"txt\","
-            @"\"pdf\",\"pptx\",\"ppt\"}\n"
-            @"return POSIX path of f";
+    // NSOpenPanel must be shown from the main AppKit thread. The old
+    // AppleScript picker ran on a background thread and reported script
+    // failures as a cancellation, which made file selection appear broken.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp activateIgnoringOtherApps:YES];
 
-        NSAppleScript *as = [[NSAppleScript alloc] initWithSource:script];
-        NSDictionary *err = nil;
-        NSAppleEventDescriptor *desc = [as executeAndReturnError:&err];
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        panel.title = @"Select a file to convert";
+        panel.message = @"Choose an image, video, audio file, document, PDF, or presentation.";
+        panel.prompt = @"Select";
+        panel.canChooseFiles = YES;
+        panel.canChooseDirectories = NO;
+        panel.allowsMultipleSelection = NO;
+        // Do not filter here. Finder/iCloud image types can have identifiers
+        // that differ from their filename extensions, which made valid images
+        // appear unavailable. We validate the selected file below instead.
+        panel.allowsOtherFileTypes = YES;
 
-        if (desc == nil || [desc stringValue].length == 0) {
+        [panel beginWithCompletionHandler:^(NSModalResponse response) {
+        if (response != NSModalResponseOK || panel.URL == nil) {
             printf("[DragShift] (No file selected or cancelled)\n");
             fflush(stdout);
             return;
         }
 
-        NSString *filePath = [[desc stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *filePath = panel.URL.path;
         printf("[DragShift] ✅ Selected: %s\n", [filePath UTF8String]);
         fflush(stdout);
 
@@ -432,36 +514,35 @@ void openFileDialogAndConvert(void) {
         printf("[DragShift] Available formats: %s\n", [str UTF8String]);
         fflush(stdout);
 
-        // Build options string for AppleScript dialog
-        NSMutableString *fmtList = [NSMutableString string];
-        for (NSUInteger i = 0; i < fmts.count; i++) {
-            if (i > 0) [fmtList appendString:@", "];
-            [fmtList appendFormat:@"\"%@\"", [fmts[i] uppercaseString]];
+        // Let NSOpenPanel finish closing before presenting the next modal UI.
+        // Without this handoff, the format dialog can be hidden behind Finder.
+        dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp activateIgnoringOtherApps:YES];
+        NSAlert *formatAlert = [[NSAlert alloc] init];
+        formatAlert.messageText = [NSString stringWithFormat:@"Convert '%@' to:", filePath.lastPathComponent];
+        formatAlert.informativeText = @"Choose the output format.";
+        [formatAlert addButtonWithTitle:@"Convert"];
+        [formatAlert addButtonWithTitle:@"Cancel"];
+
+        NSPopUpButton *formatPicker = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 220, 26) pullsDown:NO];
+        for (NSString *format in fmts) {
+            [formatPicker addItemWithTitle:format.uppercaseString];
         }
+        formatAlert.accessoryView = formatPicker;
 
-        NSString *chooseScript = [NSString stringWithFormat:
-            @"set theFormats to {%@}\n"
-            @"set chosen to choose from list theFormats with prompt "
-            @"\"Convert '%@' to:\" default items {item 1 of theFormats} with title \"DragShift\"\n"
-            @"if chosen is false then return \"\"\n"
-            @"return item 1 of chosen",
-            fmtList, [filePath lastPathComponent]];
-
-        NSAppleScript *chooseAs = [[NSAppleScript alloc] initWithSource:chooseScript];
-        NSDictionary *chooseErr = nil;
-        NSAppleEventDescriptor *chooseDesc = [chooseAs executeAndReturnError:&chooseErr];
-
-        if (chooseDesc == nil || [chooseDesc stringValue].length == 0) {
+        if ([formatAlert runModal] != NSAlertFirstButtonReturn) {
             printf("[DragShift] (Format selection cancelled)\n");
             fflush(stdout);
             return;
         }
 
-        NSString *chosenFmt = [[chooseDesc stringValue] lowercaseString];
+        NSString *chosenFmt = formatPicker.selectedItem.title.lowercaseString;
         printf("[DragShift] 🚀 Converting %s → .%s ...\n",
                [[filePath lastPathComponent] UTF8String], [chosenFmt UTF8String]);
         fflush(stdout);
 
         goPerformConversion((char *)[filePath UTF8String], (char *)[chosenFmt UTF8String]);
+        });
+        }];
     });
 }

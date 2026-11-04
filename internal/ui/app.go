@@ -73,7 +73,8 @@ func (a *App) onReady() {
 	fmt.Println("  2. Hold the Shift (⇧) key while dragging")
 	fmt.Println("  3. Release mouse, then click [ ⇧ ] in the menu bar to convert")
 	fmt.Println("• To stop DragShift, press Ctrl+C in this terminal.")
-	fmt.Println("=======================================================\n")
+	fmt.Println("=======================================================")
+	fmt.Println()
 
 	mConvert := systray.AddMenuItem("Select File to Convert...", "Choose a file to convert")
 
